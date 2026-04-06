@@ -1,0 +1,21 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Yayoi Receipt Export",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "YAYOI_CLEAN_WORKDIR": "1"
+      },
+      "args": [
+        "Photos-3-001.zip",
+        "--example",
+        "エクスポートファイル例.txt"
+      ]
+    }
+  ]
+}
