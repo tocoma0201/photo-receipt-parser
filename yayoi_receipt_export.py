@@ -223,12 +223,6 @@ def normalize_text(text: str) -> str:
         "セフン": "セブン", "マアルフン": "イレブン",
         "ファミリ一マ一ト": "ファミリーマート", "ロ一ソン": "ローソン",
         "キッチン オリジフ": "キッチンオリジン",
-        "Eneje": "EneJet", "Enejet": "EneJet", "EneJet": "EneJett",
-        "FneKey": "EneKey", "FreKey": "EneKey", "M-FneKey": "M-EneKey",
-        "O26": "2026", "o26": "2026", "２０２６": "2026", "２O２６": "2026",
-        "20264 ": "2026年4月 ", "20264": "2026年4月",
-        "2A": "2月", "3A": "3月", "4A": "4月", "5A": "5月", "6A": "6月",
-        "7A": "7月", "8A": "8月", "9A": "9月",
         "（": "(", "）": ")", "【": "[", "】": "]",
         "<QR 決済>": "QR決済", "<QR決済>": "QR決済",
         "「支払票 (売上)]": "支払票(売上)", "[支払票(売上)]": "支払票(売上)",
@@ -331,6 +325,9 @@ def extract_date(text: str) -> Optional[date]:
     t = clean_for_date(text)
     candidates: list[date] = []
 
+    today = date.today()
+
+    # --- 正規日付パターン ---
     for m in DATE_PATTERNS[0].finditer(t):
         try:
             y, mo, dd = map(int, m.groups())
@@ -352,26 +349,41 @@ def extract_date(text: str) -> Optional[date]:
         except ValueError:
             pass
 
+    # --- 年が曖昧な「xx年 月 日」 ---
     for m in DATE_PATTERNS[3].finditer(t):
         try:
             mo, dd = map(int, m.groups())
-            candidates.append(date(2026, mo, dd))
+            for year in (today.year, today.year - 1):
+                try:
+                    d = date(year, mo, dd)
+                    if date(2020, 1, 1) <= d <= today:
+                        candidates.append(d)
+                        break
+                except ValueError:
+                    pass
         except ValueError:
             pass
 
     for m in DATE_PATTERNS[4].finditer(t):
         try:
             mo, dd = map(int, m.groups())
-            candidates.append(date(2026, mo, dd))
+            for year in (today.year, today.year - 1):
+                try:
+                    d = date(year, mo, dd)
+                    if date(2020, 1, 1) <= d <= today:
+                        candidates.append(d)
+                        break
+                except ValueError:
+                    pass
         except ValueError:
             pass
 
-    today = date.today()
+    # --- 正常候補があれば最後を採用 ---
     valid = [d for d in candidates if date(2020, 1, 1) <= d <= today]
     if valid:
         return valid[-1]
 
-    # 年がOCR誤読でも、月日だけ明示されていれば拾う
+    # --- 月日だけ（年は推定） ---
     md_patterns = [
         re.compile(r'(?<!\d)(\d{1,2})月\s*(\d{1,2})日'),
         re.compile(r'(?<!\d)(\d{1,2})/(\d{1,2})(?!\d)'),
@@ -383,13 +395,22 @@ def extract_date(text: str) -> Optional[date]:
             try:
                 mo = int(m.group(1))
                 dd = int(m.group(2))
-                d = date(today.year, mo, dd)
-                if 1 <= mo <= 12 and 1 <= dd <= 31:
-                    return d
+
+                if not (1 <= mo <= 12 and 1 <= dd <= 31):
+                    continue
+
+                for year in (today.year, today.year - 1):
+                    try:
+                        d = date(year, mo, dd)
+                        if d <= today:
+                            return d
+                    except ValueError:
+                        pass
+
             except ValueError:
                 pass
 
-    # 最後の救済: 連結した YYYYMMDD だけ拾う
+    # --- 最後の救済：YYYYMMDD を含んでいれば拾う ---
     for m in re.finditer(r'(20\d{2})(\d{2})(\d{2})', t):
         try:
             y = int(m.group(1))
@@ -402,7 +423,7 @@ def extract_date(text: str) -> Optional[date]:
             pass
 
     return None
-
+    
 def extract_time(text: str) -> str:
     patterns = [
         re.compile(r"([01]?\d|2[0-3])[:時 ]([0-5]\d)"),
