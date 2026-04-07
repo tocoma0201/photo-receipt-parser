@@ -242,9 +242,40 @@ def normalize_text(text: str) -> str:
     text = re.sub(r"取\s*\n\s*引\s*\n?\s*金\s*\n?\s*額", "取引金額", text)
     text = re.sub(r"(?<!\d)(\d)[\.,]\s+(\d{3})(?!\d)", r"\1,\2", text)
     text = re.sub(r"(?<!\d)(\d),\s+(\d{3})(?!\d)", r"\1,\2", text)
+    # ご利用日時: 2026/02 \n /01 14:48:08 のような分断を救済
+    text = re.sub(
+        r'(ご利用日時[:：]?\s*\d{4}/\d{1,2})\s*\n\s*/\s*(\d{1,2})',
+        r'\1/\2',
+        text
+    )
+    # ご利用日時: 2026/02 \n /01 -> 2026/02/01
+    #text = re.sub(
+    #    r'(\d{4}/\d{1,2})\s*\n\s*/\s*(\d{1,2})',
+    #    r'\1/\2',
+    #    text
+    #)    
+    # 02 /01 -> 02/01
+    text = re.sub(r'(\d{1,2})\s*/\s*(\d{1,2})(?!\d)', r'\1/\2', text)
 
     lines = [ln.strip() for ln in text.split("\n")]
     return "\n".join(lines)
+
+def normalize_text_for_date(text: str) -> str:
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("　", " ")
+    #text = text.replace("Я", "2")   # OCR 月の誤認識対応
+    #text = text.replace("B", "8")   # OCR 日の誤認識対応    
+    #text = re.sub(r"(\d{4}/\d{1,2})\s*\n\s*/\s*(\d{1,2})", r"\1/\2", text)
+    text = re.sub(r"(\d{4})\s*#\s*(\d{1,2})\s*#\s*(\d{1,2})", r"\1/\2/\3", text)
+    text = re.sub(r"(\d{4}/\d{1,2})\s*\n\s*/\s*(\d{1,2})", r"\1/\2", text)    
+    lines = [ln.strip() for ln in text.split("\n")]
+    return "\n".join(lines)
+
+def normalize_text_for_amount(text: str) -> str:
+    text = normalize_text(text)
+    text = re.sub(r'(?<!\d)(\d)[\.,]\s+(\d{3})(?!\d)', r'\1,\2', text)
+    text = re.sub(r'(?<!\d)(\d),\s+(\d{3})(?!\d)', r'\1,\2', text)
+    return text    
 
 
 def run_ocr(image_path: Path) -> str:
@@ -261,7 +292,7 @@ def run_ocr(image_path: Path) -> str:
             if response.error.message:
                 raise RuntimeError(response.error.message)
             text = response.text_annotations[0].description if response.text_annotations else ""
-            return normalize_text(text)
+            return text
 
         except (
             gapi_exceptions.DeadlineExceeded,
@@ -288,31 +319,11 @@ def run_ocr(image_path: Path) -> str:
 
 def clean_for_date(text: str) -> str:
     t = text
-    replacements = {
-        "O26": "2026", "o26": "2026", "026年": "2026年", "026/": "2026/",
-        "2026A": "2026", "2006年": "2026年", "2006/": "2026/",
-        "2A": "2月", "3A": "3月", "4A": "4月", "5A": "5月", "6A": "6月",
-        "7A": "7月", "8A": "8月", "9A": "9月",
-    }
-    for src, dst in replacements.items():
-        t = t.replace(src, dst)
-
-    t = re.sub(r"2026\s*4\s*(\d{1,2})月\s*(\d{1,2})日", r"2026年\1月\2日", t)
-    t = re.sub(r"20264\s*(\d{1,2})月\s*(\d{1,2})日", r"2026年\1月\2日", t)
-    t = re.sub(r"(?<!\d)26年", "2026年", t)
-    t = re.sub(r"(?<!\d)8年\s*(\d{1,2})月\s*(\d{1,2})日", r"令和8年\1月\2日", t)
-    t = re.sub(r"2026年(\d{1,2})月(\d{1,2})日\(", r"2026年\1月\2日(", t)
-    t = re.sub(r"(?<!\d)2026760([1-9]|1[0-2])([0-3]\d)(?!\d)",
-               lambda m: f"2026年{int(m.group(1))}月{int(m.group(2))}日", t)
-    t = re.sub(r"(?<!\d)2026([01]\d)([0-3]\d)(?!\d)",
-               lambda m: f"2026年{int(m.group(1))}月{int(m.group(2))}日", t)
 
     # OCR崩れの月日補正
     t = re.sub(r"(\d{4})年\s*0?(\d{1,2})\D+\s*0?(\d{1,2})日", r"\1年\2月\3日", t)
     t = re.sub(r"(\d{4})[/-]\s*0?(\d{1,2})[/-]\s*0?(\d{1,2})", r"\1/\2/\3", t)
 
-    # 2026年02??27日 のようなノイズ混入を救う
-    t = re.sub(r"(20\d{2})\D{0,3}(\d{1,2})\D{1,6}(\d{1,2})日", r"\1年\2月\3日", t)
     return t
 
 
@@ -357,23 +368,40 @@ def extract_date(text: str) -> Optional[date]:
 
     today = date.today()
     valid = [d for d in candidates if date(2020, 1, 1) <= d <= today]
-    if not valid:
-        lines = [ln.strip() for ln in t.split("\n") if ln.strip()]
-        for line in lines:
-            nums = re.findall(r"\d+", line)
-            if "2026" in line and len(nums) >= 3:
-                try:
-                    y = int(nums[0])
-                    mo = int(nums[1])
-                    dd = int(nums[2])
-                    d = date(y, mo, dd)
-                    if date(2020, 1, 1) <= d <= today:
-                        valid.append(d)
-                        break
-                except ValueError:
-                    pass
-    return valid[-1] if valid else None
+    if valid:
+        return valid[-1]
 
+    # 年がOCR誤読でも、月日だけ明示されていれば拾う
+    md_patterns = [
+        re.compile(r'(?<!\d)(\d{1,2})月\s*(\d{1,2})日'),
+        re.compile(r'(?<!\d)(\d{1,2})/(\d{1,2})(?!\d)'),
+        re.compile(r'(?<!\d)(\d{1,2})-(\d{1,2})(?!\d)'),
+    ]
+
+    for pat in md_patterns:
+        for m in pat.finditer(t):
+            try:
+                mo = int(m.group(1))
+                dd = int(m.group(2))
+                d = date(today.year, mo, dd)
+                if 1 <= mo <= 12 and 1 <= dd <= 31:
+                    return d
+            except ValueError:
+                pass
+
+    # 最後の救済: 連結した YYYYMMDD だけ拾う
+    for m in re.finditer(r'(20\d{2})(\d{2})(\d{2})', t):
+        try:
+            y = int(m.group(1))
+            mo = int(m.group(2))
+            dd = int(m.group(3))
+            d = date(y, mo, dd)
+            if date(2020, 1, 1) <= d <= today:
+                return d
+        except ValueError:
+            pass
+
+    return None
 
 def extract_time(text: str) -> str:
     patterns = [
@@ -581,6 +609,10 @@ def choose_amount(text: str) -> tuple[Optional[int], list[tuple[int, int]], list
 
 def looks_like_receipt(text: str) -> bool:
     lower = text.lower()
+
+    if any(w.lower() in lower for w in GAS_WORDS):
+        return True
+            
     score = sum(1 for marker in RECEIPT_HINT_WORDS if marker.lower() in lower)
     if extract_date(text):
         score += 2
@@ -725,20 +757,22 @@ def rename_file_if_needed(image_path: Path, payment_date: date) -> tuple[Path, s
     image_path.rename(new_path)
     return new_path, new_path.name
 
-
 def process_image(image_path: Path) -> ReceiptResult | SkipResult:
     original_name = image_path.name
 
     try:
-        text = run_ocr(image_path)
+        raw_text = run_ocr(image_path)
     except Exception as e:
         return SkipResult(original_name, str(e))
 
-    if not text.strip():
+    if not raw_text.strip():
         return SkipResult(original_name, "OCR結果が空です")
 
+    date_text = normalize_text_for_date(raw_text)
+    amount_text = normalize_text_for_amount(raw_text)
+
     # まず日付だけ先に取る
-    payment_date = extract_date(text)
+    payment_date = extract_date(date_text)
 
     # 日付が取れたら、成否に関係なく先にリネーム
     renamed_path = image_path
@@ -750,31 +784,33 @@ def process_image(image_path: Path) -> ReceiptResult | SkipResult:
             renamed_path = image_path
             renamed_filename = image_path.name
 
-    if not looks_like_receipt(text):
+    if not looks_like_receipt(raw_text):
         return SkipResult(
             renamed_filename,
             f"領収書・レシートと判定できませんでした (date={payment_date})",
-            text[:220].replace("\n", " | "),
+            raw_text[:220].replace("\n", " | "),
         )
 
     if not payment_date:
+        hint_raw = raw_text[:220].replace("\n", " | ")
+        hint_date = date_text[:220].replace("\n", " | ")
         return SkipResult(
             renamed_filename,
             "支払日付を抽出できませんでした",
-            f"date=None | {text[:220].replace(chr(10), ' | ')}",
+            f"date=None | RAW: {hint_raw} | DATE: {hint_date}",
         )
 
-    amount, strong, weak, fallback, reason = choose_amount(text)
+    amount, strong, weak, fallback, reason = choose_amount(amount_text)
     if amount is None:
         return SkipResult(
             renamed_filename,
             "金額を抽出できませんでした",
-            text[:220].replace("\n", " | "),
+            raw_text[:220].replace("\n", " | "),
         )
 
-    vendor = extract_vendor(text)
-    time_text = extract_time(text)
-    debit_account, summary = classify_receipt(text, vendor)
+    vendor = extract_vendor(raw_text)
+    time_text = extract_time(raw_text)
+    debit_account, summary = classify_receipt(raw_text, vendor)
 
     return ReceiptResult(
         filename=renamed_path.name,
@@ -784,7 +820,7 @@ def process_image(image_path: Path) -> ReceiptResult | SkipResult:
         debit_account=debit_account,
         summary=summary,
         memo=renamed_filename,
-        ocr_text=text,
+        ocr_text=raw_text,
         vendor=vendor,
         renamed_filename=renamed_filename,
         time_text=time_text,
