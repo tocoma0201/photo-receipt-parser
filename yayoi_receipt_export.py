@@ -142,6 +142,13 @@ class ReceiptResult:
     fallback_candidates: list[int] = field(default_factory=list)
     amount_reason: str = ""
     date_warning: str = ""
+    ocr_date_text: str = ""
+    ocr_amount_text: str = ""
+
+@dataclass
+class OcrBundle:
+    raw_text: str
+    amount_text: str
 
 @dataclass
 class SkipResult:
@@ -280,7 +287,60 @@ def normalize_text_for_amount(text: str) -> str:
     return text    
 
 
-def run_ocr(image_path: Path) -> str:
+def rebuild_text_from_full_text_annotation(response) -> str:
+    if not response.full_text_annotation or not response.full_text_annotation.pages:
+        return ""
+
+    rows: list[tuple[float, float, str]] = []
+
+    for page in response.full_text_annotation.pages:
+        for block in page.blocks:
+            for paragraph in block.paragraphs:
+                for word in paragraph.words:
+                    text = "".join(sym.text for sym in word.symbols)
+                    vs = word.bounding_box.vertices
+                    xs = [v.x or 0 for v in vs]
+                    ys = [v.y or 0 for v in vs]
+                    x = min(xs)
+                    y = sum(ys) / len(ys)
+                    rows.append((y, x, text))
+
+    if not rows:
+        return ""
+
+    rows.sort(key=lambda r: (r[0], r[1]))
+
+    grouped: list[list[tuple[float, float, str]]] = []
+    current: list[tuple[float, float, str]] = []
+    current_y = None
+    y_threshold = 18
+
+    for item in rows:
+        y, x, text = item
+        if current_y is None or abs(y - current_y) <= y_threshold:
+            current.append(item)
+            if current_y is None:
+                current_y = y
+            else:
+                current_y = (current_y * (len(current) - 1) + y) / len(current)
+        else:
+            grouped.append(sorted(current, key=lambda r: r[1]))
+            current = [item]
+            current_y = y
+
+    if current:
+        grouped.append(sorted(current, key=lambda r: r[1]))
+
+    lines: list[str] = []
+    for group in grouped:
+        line = " ".join(t for _, _, t in group).strip()
+        if line:
+            lines.append(line)
+
+    return "\n".join(lines)
+
+
+def run_ocr(image_path: Path) -> OcrBundle:
     with image_path.open("rb") as f:
         content = f.read()
 
@@ -290,11 +350,22 @@ def run_ocr(image_path: Path) -> str:
 
     for attempt in range(1, OCR_RETRY_COUNT + 1):
         try:
-            response = client.text_detection(image=image, timeout=OCR_TIMEOUT_SEC)
+            response = client.document_text_detection(image=image, timeout=OCR_TIMEOUT_SEC)
             if response.error.message:
                 raise RuntimeError(response.error.message)
-            text = response.text_annotations[0].description if response.text_annotations else ""
-            return text
+
+            debug_dump_words_near_total(response, image_path.name)
+
+            raw_text = ""
+            if response.full_text_annotation and response.full_text_annotation.text:
+                raw_text = response.full_text_annotation.text
+
+            amount_text = rebuild_text_from_full_text_annotation(response)
+
+            return OcrBundle(
+                raw_text=raw_text,
+                amount_text=amount_text,
+            )
 
         except (
             gapi_exceptions.DeadlineExceeded,
@@ -316,8 +387,7 @@ def run_ocr(image_path: Path) -> str:
 
     if last_error is not None:
         raise RuntimeError(str(last_error))
-    return ""
-
+    return OcrBundle(raw_text="", amount_text="")
 
 def clean_for_date(text: str) -> str:
     t = text
@@ -794,19 +864,56 @@ def rename_file_if_needed(image_path: Path, payment_date: date) -> tuple[Path, s
     image_path.rename(new_path)
     return new_path, new_path.name
 
+def debug_dump_words_near_total(response, image_name: str) -> None:
+    if image_name != "IMG20260302042208.jpg":
+        return
+    if not response.full_text_annotation or not response.full_text_annotation.pages:
+        return
+
+    words = []
+    for page in response.full_text_annotation.pages:
+        for block in page.blocks:
+            for paragraph in block.paragraphs:
+                for word in paragraph.words:
+                    text = "".join(sym.text for sym in word.symbols)
+                    vs = word.bounding_box.vertices
+                    xs = [v.x or 0 for v in vs]
+                    ys = [v.y or 0 for v in vs]
+                    x = min(xs)
+                    y = sum(ys) / len(ys)
+                    words.append((text, x, y, xs, ys))
+
+    target_ys = [y for text, x, y, xs, ys in words if "425" in text]
+    if not target_ys:
+        print("\n==== DEBUG COORD 0123 ====")
+        print("425 が見つかりません")
+        print("==========================\n")
+        return
+
+    print("\n==== DEBUG COORD 0123 ====")
+    for target_y in target_ys:
+        print(f"\n-- around y={target_y:.1f} --")
+        for text, x, y, xs, ys in sorted(words, key=lambda t: (t[2], t[1])):
+            if abs(y - target_y) <= 80:
+                print(f"text={text!r} x={x} y={y:.1f} xs={xs} ys={ys}")
+    print("==========================\n")
+
 def process_image(image_path: Path) -> ReceiptResult | SkipResult:
     original_name = image_path.name
 
     try:
-        raw_text = run_ocr(image_path)
+        ocr = run_ocr(image_path)
     except Exception as e:
         return SkipResult(original_name, str(e))
 
-    if not raw_text.strip():
+    raw_text = ocr.raw_text
+    amount_raw_text = ocr.amount_text
+
+    if not raw_text.strip() and not amount_raw_text.strip():
         return SkipResult(original_name, "OCR結果が空です")
 
     date_text = normalize_text_for_date(raw_text)
-    amount_text = normalize_text_for_amount(raw_text)
+    amount_text = normalize_text_for_amount(amount_raw_text)
 
     payment_date = extract_date(date_text)
 
@@ -831,30 +938,27 @@ def process_image(image_path: Path) -> ReceiptResult | SkipResult:
         )
 
     if not payment_date:
-        hint_raw = raw_text[:220].replace("\n", " | ")
-        hint_date = date_text[:220].replace("\n", " | ")
+        hint_date_raw = raw_text[:220].replace("\n", " | ")
+        hint_date_norm = date_text[:220].replace("\n", " | ")
+        hint_amount_raw = amount_raw_text[:220].replace("\n", " | ")
+        hint_amount_norm = amount_text[:220].replace("\n", " | ")
         return SkipResult(
             renamed_filename,
             "支払日付を抽出できませんでした",
-            f"date=None | RAW: {hint_raw} | DATE: {hint_date}",
+            f"date=None | DATE_RAW: {hint_date_raw} | DATE_NORM: {hint_date_norm} | AMOUNT_RAW: {hint_amount_raw} | AMOUNT_NORM: {hint_amount_norm}",
         )
 
     amount, strong, weak, fallback, reason = choose_amount(amount_text)
 
-    if image_path.name == "IMG20260302042307.jpg":
-        print("\n==== DEBUG 0122 ====")
-        print(amount_text)
-        print("strong:", strong)
-        print("weak:", weak)
-        print("fallback:", fallback)
-        print("chosen:", amount, reason)
-        print("====================\n")
-
     if amount is None:
+        hint_date_raw = raw_text[:220].replace("\n", " | ")
+        hint_date_norm = date_text[:220].replace("\n", " | ")
+        hint_amount_raw = amount_raw_text[:220].replace("\n", " | ")
+        hint_amount_norm = amount_text[:220].replace("\n", " | ")
         return SkipResult(
             renamed_filename,
             "金額を抽出できませんでした",
-            raw_text[:220].replace("\n", " | "),
+            f"DATE_RAW: {hint_date_raw} | DATE_NORM: {hint_date_norm} | AMOUNT_RAW: {hint_amount_raw} | AMOUNT_NORM: {hint_amount_norm}",
         )
 
     vendor = extract_vendor(raw_text)
@@ -882,7 +986,10 @@ def process_image(image_path: Path) -> ReceiptResult | SkipResult:
         fallback_candidates=fallback,
         amount_reason=reason,
         date_warning=date_warning,
+        ocr_date_text=date_text,
+        ocr_amount_text=amount_text,
     )
+
 
 def deduplicate_results(results: list[ReceiptResult]) -> list[ReceiptResult]:
     merged: dict[tuple[str, str, str, int], ReceiptResult] = {}
@@ -919,6 +1026,7 @@ def write_skip_log(skips: list[SkipResult], output_dir: Path) -> Path:
             f.write(line + "\r\n")
     return output_path
 
+
 def write_success_log(results: list[ReceiptResult], output_dir: Path) -> Path:
     output_path = output_dir / "成功ログ.txt"
     with output_path.open("w", encoding="utf-8", newline="") as f:
@@ -939,13 +1047,14 @@ def write_success_log(results: list[ReceiptResult], output_dir: Path) -> Path:
                 "[金額候補]",
                 f"strong: {r.strong_candidates}",
                 f"weak: {r.weak_candidates}",
-
-
                 f"fallback: {r.fallback_candidates}",
                 f"chosen: {r.amount} ({r.amount_reason})",
                 "------------------------------",
-                "[OCR]",
-                r.ocr_text.rstrip(),
+                "[OCR_DATE]",
+                r.ocr_date_text.rstrip(),
+                "------------------------------",
+                "[OCR_AMOUNT]",
+                r.ocr_amount_text.rstrip(),
                 "==============================",
                 "",
             ]
