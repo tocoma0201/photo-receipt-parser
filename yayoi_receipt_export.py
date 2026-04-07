@@ -103,6 +103,12 @@ HOME_CENTER_WORDS = [
     "ビバホーム", "島忠", "ホーマック", "dcm", "ケーヨー",
     "ハンズマン", "ホームセンター", "オートバックス", "autobacs",
 ]
+PARKING_WORDS = [
+    "駐車", "駐輪", "パーキング", "parking",
+    "タイムズ", "times", "コインパーキング",
+    "駐車場", "駐輪場", "精算機", "入庫", "出庫",
+    "駐車料金", "駐輪料金",
+]
 
 DATE_PATTERNS = [
     re.compile(r"(20\d{2})[\/\-.年 ]\s*(\d{1,2})[\/\-.月 ]\s*(\d{1,2})日?"),
@@ -135,7 +141,7 @@ class ReceiptResult:
     weak_candidates: list[int] = field(default_factory=list)
     fallback_candidates: list[int] = field(default_factory=list)
     amount_reason: str = ""
-
+    date_warning: str = ""
 
 @dataclass
 class SkipResult:
@@ -269,6 +275,8 @@ def normalize_text_for_amount(text: str) -> str:
     text = normalize_text(text)
     text = re.sub(r'(?<!\d)(\d)[\.,]\s+(\d{3})(?!\d)', r'\1,\2', text)
     text = re.sub(r'(?<!\d)(\d),\s+(\d{3})(?!\d)', r'\1,\2', text)
+    # 合計 + 改行 + 数値 を1行にする
+    text = re.sub(r'(合計|総合計|税込合計)\s*\n\s*([0-9,]+)', r'\1 \2', text)
     return text    
 
 
@@ -325,9 +333,7 @@ def extract_date(text: str) -> Optional[date]:
     t = clean_for_date(text)
     candidates: list[date] = []
 
-    today = date.today()
-
-    # --- 正規日付パターン ---
+    # 1. YYYY年M月D日
     for m in DATE_PATTERNS[0].finditer(t):
         try:
             y, mo, dd = map(int, m.groups())
@@ -335,6 +341,7 @@ def extract_date(text: str) -> Optional[date]:
         except ValueError:
             pass
 
+    # 2. 令和
     for m in DATE_PATTERNS[1].finditer(t):
         try:
             _, ry, mo, dd = m.groups()
@@ -342,6 +349,7 @@ def extract_date(text: str) -> Optional[date]:
         except ValueError:
             pass
 
+    # 3. YYYY/MM/DD
     for m in DATE_PATTERNS[2].finditer(t):
         try:
             y, mo, dd = map(int, m.groups())
@@ -349,41 +357,34 @@ def extract_date(text: str) -> Optional[date]:
         except ValueError:
             pass
 
-    # --- 年が曖昧な「xx年 月 日」 ---
+    # 4. MM/DD（年なし）
+    current_year = date.today().year
+
     for m in DATE_PATTERNS[3].finditer(t):
         try:
             mo, dd = map(int, m.groups())
-            for year in (today.year, today.year - 1):
-                try:
-                    d = date(year, mo, dd)
-                    if date(2020, 1, 1) <= d <= today:
-                        candidates.append(d)
-                        break
-                except ValueError:
-                    pass
+            candidates.append(date(current_year, mo, dd))
         except ValueError:
             pass
 
+    # 5. MM-DD（年なし）
     for m in DATE_PATTERNS[4].finditer(t):
         try:
             mo, dd = map(int, m.groups())
-            for year in (today.year, today.year - 1):
-                try:
-                    d = date(year, mo, dd)
-                    if date(2020, 1, 1) <= d <= today:
-                        candidates.append(d)
-                        break
-                except ValueError:
-                    pass
+            candidates.append(date(current_year, mo, dd))
         except ValueError:
             pass
 
-    # --- 正常候補があれば最後を採用 ---
+    # 有効範囲フィルタ
+    today = date.today()
     valid = [d for d in candidates if date(2020, 1, 1) <= d <= today]
+
     if valid:
         return valid[-1]
 
-    # --- 月日だけ（年は推定） ---
+    # --- 救済（最小限） ---
+    # 年が無くても月日だけ取れる場合
+
     md_patterns = [
         re.compile(r'(?<!\d)(\d{1,2})月\s*(\d{1,2})日'),
         re.compile(r'(?<!\d)(\d{1,2})/(\d{1,2})(?!\d)'),
@@ -395,22 +396,12 @@ def extract_date(text: str) -> Optional[date]:
             try:
                 mo = int(m.group(1))
                 dd = int(m.group(2))
-
-                if not (1 <= mo <= 12 and 1 <= dd <= 31):
-                    continue
-
-                for year in (today.year, today.year - 1):
-                    try:
-                        d = date(year, mo, dd)
-                        if d <= today:
-                            return d
-                    except ValueError:
-                        pass
-
+                if 1 <= mo <= 12 and 1 <= dd <= 31:
+                    return date(current_year, mo, dd)
             except ValueError:
                 pass
 
-    # --- 最後の救済：YYYYMMDD を含んでいれば拾う ---
+    # 最後の救済: YYYYMMDD
     for m in re.finditer(r'(20\d{2})(\d{2})(\d{2})', t):
         try:
             y = int(m.group(1))
@@ -423,7 +414,11 @@ def extract_date(text: str) -> Optional[date]:
             pass
 
     return None
-    
+
+def is_suspicious_date(d: date) -> bool:
+    today = date.today()
+    return d > today or d.year < today.year - 1
+
 def extract_time(text: str) -> str:
     patterns = [
         re.compile(r"([01]?\d|2[0-3])[:時 ]([0-5]\d)"),
@@ -546,7 +541,7 @@ def extract_amount_candidates(text: str) -> tuple[list[tuple[int, int]], list[in
             continue
 
         block = lines[i:min(i + 8, len(lines))]
-        candidates_detail: list[tuple[int, bool, str]] = []
+        candidates_detail: list[tuple[int, bool, str, bool]] = []
         for blk_line in block:
             if looks_like_id_line(blk_line):
                 continue
@@ -554,21 +549,26 @@ def extract_amount_candidates(text: str) -> tuple[list[tuple[int, int]], list[in
                 continue
             if looks_like_tax_or_subtotal_line(blk_line) and "合計" not in blk_line and "ご利用額" not in blk_line and "取引金額" not in blk_line and "金額" not in blk_line:
                 continue
+
+            is_total_line = any(word.lower() in blk_line.lower() for word in TOTAL_WORDS_STRONG)
+
             for amount, has_currency in collect_amounts_from_line(blk_line):
-                candidates_detail.append((amount, has_currency, blk_line))
+                candidates_detail.append((amount, has_currency, blk_line, is_total_line))
 
         if not candidates_detail:
             continue
 
         freq: dict[int, int] = {}
-        for amount, _, _ in candidates_detail:
+        for amount, _, _, _ in candidates_detail:
             freq[amount] = freq.get(amount, 0) + 1
 
-        block_max_amount = max(amount for amount, _, _ in candidates_detail)
+        block_max_amount = max(amount for amount, _, _, _ in candidates_detail)
 
         best_amount = None
         best_score = -10**9
-        for amount, has_currency, src_line in candidates_detail:
+        total_line_amounts: list[int] = []
+
+        for amount, has_currency, src_line, is_total_line in candidates_detail:
             score = score_strong_amount(
                 amount,
                 has_currency,
@@ -577,13 +577,23 @@ def extract_amount_candidates(text: str) -> tuple[list[tuple[int, int]], list[in
                 line,
                 block_max_amount,
             )
+
             if src_line == line:
                 score += 8
+
+            if is_total_line:
+                score += 60
+                if 100 <= amount <= 50000:
+                    total_line_amounts.append(amount)
+
             if score > best_score:
                 best_score = score
                 best_amount = amount
 
-        if best_amount is not None and best_score >= -10:
+        # 合計ラベルブロックでは、合計行付近の妥当な最大額を優先
+        if total_line_amounts:
+            strong_with_priority.append((max(total_line_amounts), best_score + 100))
+        elif best_amount is not None and best_score >= -10:
             strong_with_priority.append((best_amount, best_score))
 
     for line in lines:
@@ -614,19 +624,23 @@ def extract_amount_candidates(text: str) -> tuple[list[tuple[int, int]], list[in
 
 def choose_amount(text: str) -> tuple[Optional[int], list[tuple[int, int]], list[int], list[int], str]:
     strong, weak, fallback = extract_amount_candidates(text)
+
     if strong:
         strong_sorted = sorted(strong, key=lambda x: (-x[1], -x[0]))
         return strong_sorted[0][0], strong_sorted, weak, fallback, "strong"
+
     filtered_weak = [x for x in weak if x >= 100 or (not fallback and x >= 10)]
     if filtered_weak:
         return filtered_weak[0], strong, filtered_weak, fallback, "weak"
+
     filtered_fallback = [x for x in fallback if x >= 100]
     if filtered_fallback:
         return filtered_fallback[0], strong, weak, fallback, "fallback"
+
     if fallback:
         return fallback[0], strong, weak, fallback, "fallback"
-    return None, strong, weak, fallback, ""
 
+    return None, strong, weak, fallback, ""
 
 def looks_like_receipt(text: str) -> bool:
     lower = text.lower()
@@ -737,6 +751,8 @@ def classify_receipt(text: str, vendor: str) -> tuple[str, str]:
     vendor_lower = vendor.lower()
     if any(w.lower() in lower or w.lower() in vendor_lower for w in GAS_WORDS):
         return "旅費交通費", "ガソリン代"
+    if any(w.lower() in lower or w.lower() in vendor_lower for w in PARKING_WORDS):
+        return "旅費交通費", "駐車・駐輪代"
     if any(w.lower() in lower or w.lower() in vendor_lower for w in MASSAGE_WORDS):
         return "接待交際費", "マッサージ代"
     if any(w.lower() in lower or w.lower() in vendor_lower for w in HAIRCUT_WORDS):
@@ -792,10 +808,12 @@ def process_image(image_path: Path) -> ReceiptResult | SkipResult:
     date_text = normalize_text_for_date(raw_text)
     amount_text = normalize_text_for_amount(raw_text)
 
-    # まず日付だけ先に取る
     payment_date = extract_date(date_text)
 
-    # 日付が取れたら、成否に関係なく先にリネーム
+    date_warning = ""
+    if payment_date and is_suspicious_date(payment_date):
+        date_warning = f"! suspicious date: {payment_date.isoformat()}"
+
     renamed_path = image_path
     renamed_filename = image_path.name
     if payment_date:
@@ -822,6 +840,16 @@ def process_image(image_path: Path) -> ReceiptResult | SkipResult:
         )
 
     amount, strong, weak, fallback, reason = choose_amount(amount_text)
+
+    if image_path.name == "IMG20260302042307.jpg":
+        print("\n==== DEBUG 0122 ====")
+        print(amount_text)
+        print("strong:", strong)
+        print("weak:", weak)
+        print("fallback:", fallback)
+        print("chosen:", amount, reason)
+        print("====================\n")
+
     if amount is None:
         return SkipResult(
             renamed_filename,
@@ -832,6 +860,9 @@ def process_image(image_path: Path) -> ReceiptResult | SkipResult:
     vendor = extract_vendor(raw_text)
     time_text = extract_time(raw_text)
     debit_account, summary = classify_receipt(raw_text, vendor)
+
+    if date_warning:
+        summary = f"!{summary}"
 
     return ReceiptResult(
         filename=renamed_path.name,
@@ -850,6 +881,7 @@ def process_image(image_path: Path) -> ReceiptResult | SkipResult:
         weak_candidates=weak,
         fallback_candidates=fallback,
         amount_reason=reason,
+        date_warning=date_warning,
     )
 
 def deduplicate_results(results: list[ReceiptResult]) -> list[ReceiptResult]:
@@ -896,6 +928,7 @@ def write_success_log(results: list[ReceiptResult], output_dir: Path) -> Path:
                 f"ファイル名: {r.filename}",
                 f"元ファイル名: {r.original_filename}",
                 f"日付: {r.payment_date.isoformat()}",
+                f"日付警告: {r.date_warning}",
                 f"金額: {r.amount}",
                 f"勘定科目: {r.debit_account}",
                 f"摘要: {r.summary}",
