@@ -26,6 +26,7 @@ import os
 import re
 import shutil
 import sys
+import datetime
 import time
 import zipfile
 from dataclasses import dataclass, field
@@ -211,18 +212,18 @@ def ensure_clean_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def iter_images(input_path: Path, work_dir: Path) -> list[Path]:
+def iter_images(input_path: Path, output_dir: Path) -> list[Path]:
     if input_path.is_dir():
         return sorted([p for p in input_path.rglob("*") if p.suffix.lower() in IMAGE_EXTS])
 
     if input_path.is_file() and input_path.suffix.lower() == ".zip":
-        extract_dir = work_dir / "extracted_images"
-        log(f"ZIP 展開先を初期化: {extract_dir}")
-        ensure_clean_dir(extract_dir)
+        images_dir = output_dir / "images"
+        log(f"ZIP 展開先を初期化: {images_dir}")
+        ensure_clean_dir(images_dir)
         log(f"ZIP 展開中: {input_path}")
         with zipfile.ZipFile(input_path, "r") as zf:
-            zf.extractall(extract_dir)
-        return sorted([p for p in extract_dir.rglob("*") if p.suffix.lower() in IMAGE_EXTS])
+            zf.extractall(images_dir)
+        return sorted([p for p in images_dir.rglob("*") if p.suffix.lower() in IMAGE_EXTS])
 
     raise ValueError(f"入力が画像フォルダまたは zip ではありません: {input_path}")
 
@@ -1040,7 +1041,7 @@ def deduplicate_results(results: list[ReceiptResult]) -> list[ReceiptResult]:
 
 
 def write_import(results: list[ReceiptResult], output_dir: Path, encoding: str) -> Path:
-    output_path = output_dir / "エクスポート.txt"
+    output_path = output_dir / datetime.datetime.now().strftime('import_%Y%m%d.txt')
     with output_path.open("w", encoding=encoding, newline="") as f:
         writer = csv.writer(f, lineterminator="\r\n")
         for seq, r in enumerate(results, start=1):
@@ -1050,7 +1051,7 @@ def write_import(results: list[ReceiptResult], output_dir: Path, encoding: str) 
 
 
 def write_skip_log(skips: list[SkipResult], output_dir: Path) -> Path:
-    output_path = output_dir / "スキップログ.txt"
+    output_path = output_dir / "skip_log.txt"
     with output_path.open("w", encoding="utf-8", newline="") as f:
         for s in skips:
             line = f"{s.filename}\t{s.reason}"
@@ -1061,7 +1062,7 @@ def write_skip_log(skips: list[SkipResult], output_dir: Path) -> Path:
 
 
 def write_success_log(results: list[ReceiptResult], output_dir: Path) -> Path:
-    output_path = output_dir / "成功ログ.txt"
+    output_path = output_dir / "success_log.txt"
     with output_path.open("w", encoding="utf-8", newline="") as f:
         for r in results:
             blocks = [
@@ -1099,9 +1100,8 @@ def write_success_log(results: list[ReceiptResult], output_dir: Path) -> Path:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="レシート画像から弥生青色申告向けファイルを生成")
     parser.add_argument("input_path", help="画像フォルダ または ZIP")
-    parser.add_argument("--example", required=True, help="参考エクスポートファイルのパス")
-    parser.add_argument("--output-dir", default="output_yayoi", help="出力先ディレクトリ")
-    parser.add_argument("--work-dir", default=None, help="作業ディレクトリ")
+    #parser.add_argument("--example", required=True, help="参考エクスポートファイルのパス")
+    parser.add_argument("--output-dir", default="data/import_yayoi", help="出力先ディレクトリ")
     return parser
 
 
@@ -1110,27 +1110,19 @@ def main() -> int:
     args = parser.parse_args()
 
     input_path = Path(args.input_path)
-    example_path = Path(args.example)
+    #example_path = Path(args.example)
     output_dir = Path(args.output_dir)
-
-    if args.work_dir:
-        work_dir = Path(args.work_dir)
-    else:
-        work_dir = output_dir / "_work"
 
     if output_dir.exists():
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if work_dir.exists():
-        shutil.rmtree(work_dir)
-    work_dir.mkdir(parents=True, exist_ok=True)
-
     log("開始します")
-    encoding = read_example_encoding(example_path)
+    #encoding = read_example_encoding(example_path)
+    encode = "cp932"
     log(f"文字コード: {encoding}")
 
-    images = iter_images(input_path, work_dir)
+    images = iter_images(input_path, output_dir)
     log(f"対象画像数: {len(images)}")
 
     successes: list[ReceiptResult] = []
