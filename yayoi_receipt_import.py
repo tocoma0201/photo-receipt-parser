@@ -1043,7 +1043,7 @@ def deduplicate_results(results: list[ReceiptResult]) -> list[ReceiptResult]:
 def write_import(results: list[ReceiptResult], output_dir: Path, encoding: str) -> Path:
     output_path = output_dir / datetime.datetime.now().strftime('import_%Y%m%d.txt')
     with output_path.open("w", encoding=encoding, newline="") as f:
-        writer = csv.writer(f, lineterminator="\r\n")
+        writer = csv.writer(f, lineterminator="\r\n", quoting=csv.QUOTE_ALL)
         for seq, r in enumerate(results, start=1):
             row = [safe_text_for_encoding(str(v), encoding) if isinstance(v, str) else v for v in make_import_row(seq, r)]
             writer.writerow(row)
@@ -1119,7 +1119,7 @@ def main() -> int:
 
     log("開始します")
     #encoding = read_example_encoding(example_path)
-    encode = "cp932"
+    encoding = "cp932"
     log(f"文字コード: {encoding}")
 
     images = iter_images(input_path, output_dir)
