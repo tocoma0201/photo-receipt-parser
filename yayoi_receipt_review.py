@@ -10,6 +10,8 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+DEFAULT_JSON_PATH = Path("data/import_yayoi/receipt_work.json")
+
 HTML = r'''<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>レシート確認</title>
 <style>body{font-family:sans-serif;margin:0;background:#eee}header{padding:8px 16px;background:#333;color:#fff;display:flex;gap:20px}.main{display:grid;grid-template-columns:minmax(420px,1fr) 430px;height:calc(100vh - 48px)}.image{display:flex;align-items:flex-start;justify-content:center;overflow:auto;background:#555;padding:12px}.image img{max-width:100%;height:auto;background:white}.form{padding:16px;overflow:auto;background:white}.row{margin:9px 0}.row label{display:block;font-weight:bold;margin-bottom:3px}.row input,.row select,.row textarea{box-sizing:border-box;width:100%;font-size:16px;padding:6px}.check{font-size:18px;margin:16px 0}.check input{transform:scale(1.4);margin-right:8px}.warn{padding:8px;background:#fff3cd;white-space:pre-wrap}.buttons{display:flex;gap:8px;position:sticky;bottom:0;background:white;padding:12px 0}.buttons button{font-size:16px;padding:10px 14px}.muted{color:#666;font-size:13px}</style></head><body>
 <header><span id="pos"></span><span id="progress"></span><label><input id="onlyUnconfirmed" type="checkbox" checked> 未確認だけ</label></header>
@@ -30,10 +32,10 @@ HTML = r'''<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>レ
 </div></div>
 <script>
 let data=[], index=0; const fields=['date','time','vendor','debit_account','summary'];
-async function load(){data=await (await fetch('/api/receipts')).json(); let u=data.findIndex(x=>!x.confirmed); index=u>=0?u:0; show()}
-function visibleIndexes(){let only=document.getElementById('onlyUnconfirmed').checked; return data.map((r,i)=>[r,i]).filter(([r])=>!only||!r.confirmed).map(([,i])=>i)}
-function show(){if(!data.length)return; let r=data[index]; document.getElementById('pos').textContent=`${index+1} / ${data.length}`; document.getElementById('progress').textContent=`確認済 ${data.filter(x=>x.confirmed).length} / ${data.length}`; document.getElementById('receiptImage').src='/image?i='+index+'&t='+Date.now(); document.getElementById('filename').textContent=r.image; document.getElementById('warning').textContent=r.warning||'警告なし'; fields.forEach(f=>document.getElementById(f).value=r[f]??''); document.getElementById('amount').value=r.amount??''; document.getElementById('use').checked=r.use!==false; document.getElementById('confirmed').checked=!!r.confirmed; document.getElementById('ocr_text').value=r.ocr_text||''}
-function collect(confirm){let r={...data[index]}; fields.forEach(f=>r[f]=document.getElementById(f).value); let a=document.getElementById('amount').value;r.amount=a===''?null:Number(a);r.use=document.getElementById('use').checked;r.confirmed=confirm?true:document.getElementById('confirmed').checked;return r}
+async function load(){try{let res=await fetch('/api/receipts');if(!res.ok)throw new Error(await res.text());data=await res.json();if(!data.length)throw new Error('レシートデータがありません');let u=data.findIndex(x=>!x.confirmed);index=u>=0?u:0;show()}catch(e){document.getElementById('warning').textContent='読み込みエラー: '+e.message}}
+function visibleIndexes(){let only=document.getElementById('onlyUnconfirmed').checked;return data.map((r,i)=>[r,i]).filter(([r])=>!only||!r.confirmed).map(([,i])=>i)}
+function show(){if(!data.length)return;let r=data[index];document.getElementById('pos').textContent=`${index+1} / ${data.length}`;document.getElementById('progress').textContent=`確認済 ${data.filter(x=>x.confirmed).length} / ${data.length}`;document.getElementById('receiptImage').src='/image?i='+index+'&t='+Date.now();document.getElementById('filename').textContent=r.image;document.getElementById('warning').textContent=r.warning||'警告なし';fields.forEach(f=>document.getElementById(f).value=r[f]??'');document.getElementById('amount').value=r.amount??'';document.getElementById('use').checked=r.use!==false;document.getElementById('confirmed').checked=!!r.confirmed;document.getElementById('ocr_text').value=r.ocr_text||''}
+function collect(confirm){let r={...data[index]};fields.forEach(f=>r[f]=document.getElementById(f).value);let a=document.getElementById('amount').value;r.amount=a===''?null:Number(a);r.use=document.getElementById('use').checked;r.confirmed=confirm?true:document.getElementById('confirmed').checked;return r}
 async function save(next){let r=collect(next);let res=await fetch('/api/receipt?i='+index,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(r)});if(!res.ok){alert(await res.text());return}data[index]=r;if(next)move(1);else show()}
 function move(dir){let list=visibleIndexes();let p=list.indexOf(index);if(p<0){let candidate=list.find(i=>dir>0?i>index:i<index);if(candidate!==undefined)index=candidate}else{let n=p+dir;if(n>=0&&n<list.length)index=list[n]}show()}
 document.getElementById('onlyUnconfirmed').addEventListener('change',()=>{let list=visibleIndexes();if(list.length&&!list.includes(index))index=list[0];show()});
@@ -75,7 +77,16 @@ def make_handler(json_path: Path):
 
 def main():
     p=argparse.ArgumentParser(description="Pass 2: 中間JSONをブラウザで確認・編集")
-    p.add_argument("json_path"); p.add_argument("--host",default="127.0.0.1"); p.add_argument("--port",type=int,default=8080); a=p.parse_args()
-    path=Path(a.json_path).resolve(); server=ThreadingHTTPServer((a.host,a.port),make_handler(path)); print(f"確認画面: http://{a.host}:{a.port}/"); print("終了: Ctrl+C"); server.serve_forever()
+    p.add_argument("json_path", nargs="?", default=str(DEFAULT_JSON_PATH), help=f"中間JSON (既定: {DEFAULT_JSON_PATH})")
+    p.add_argument("--host",default="127.0.0.1"); p.add_argument("--port",type=int,default=8080); a=p.parse_args()
+    path=Path(a.json_path).resolve()
+    if not path.is_file():
+        p.error(f"中間JSONが見つかりません: {path}\nPass 1 の出力先を確認してください。既定値は {DEFAULT_JSON_PATH} です。")
+    try:
+        work=json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(work.get("receipts"),list): raise ValueError("receipts 配列がありません")
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        p.error(f"中間JSONを読み込めません: {e}")
+    server=ThreadingHTTPServer((a.host,a.port),make_handler(path));print(f"中間JSON: {path}");print(f"確認画面: http://{a.host}:{a.port}/");print("終了: Ctrl+C");server.serve_forever()
 
 if __name__=="__main__": main()
