@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Pass 2: 中間JSONを画像1枚ずつブラウザで確認・編集する。"""
 from __future__ import annotations
-import argparse,json,mimetypes,subprocess,sys,threading,urllib.parse
+import argparse,json,mimetypes,subprocess,sys,threading,urllib.parse,webbrowser
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from pathlib import Path
 DEFAULT_JSON_PATH=Path("data/import_yayoi/receipt_work.json")
@@ -29,7 +29,7 @@ async function confirmNext(){await flushSave();let current=index,r={...data[curr
 async function toggleConfirmed(i){await flushSave();let r={...data[i],confirmed:!data[i].confirmed};if(await persist(i,r)){if(i===index)document.getElementById('confirmed').checked=r.confirmed;show()}}
 async function jump(i){await flushSave();if(i!==index){index=i;show()}}async function move(dir){await flushSave();moveFrom(index,dir)}function moveFrom(from,dir){let order=sortedIndexes(),p=order.indexOf(from),n=p+dir;if(n>=0&&n<order.length)index=order[n];show()}
 async function generateImport(){await flushSave();let res=await fetch('/api/generate',{method:'POST'}),text=await res.text();alert(text);if(res.ok){let r=await fetch('/api/receipts');if(r.ok){data=await r.json();show()}}}
-async function exitReview(){await flushSave();let res=await fetch('/api/shutdown',{method:'POST'});if(res.ok){document.body.innerHTML='<div style="padding:30px;font-family:sans-serif">レシート確認を終了しました。このタブを閉じてください。</div>'}else alert(await res.text())}
+async function exitReview(){await flushSave();let res=await fetch('/api/shutdown',{method:'POST'});if(!res.ok){alert(await res.text());return}window.open('','_self');window.close();setTimeout(()=>{document.body.innerHTML='<div style="padding:30px;font-family:sans-serif">レシート確認を終了しました。このタブはブラウザの制限により自動で閉じられませんでした。</div>'},300)}
 fields.concat(['amount']).forEach(id=>document.getElementById(id).addEventListener('input',scheduleSave));['use','confirmed'].forEach(id=>document.getElementById(id).addEventListener('change',scheduleSave));document.getElementById('onlyUnconfirmed').addEventListener('change',async()=>{await flushSave();let list=visibleIndexes();if(list.length&&!list.includes(index))index=list[0];show()});document.addEventListener('keydown',e=>{if(e.ctrlKey&&e.key==='Enter'){e.preventDefault();confirmNext()}});load();
 </script></body></html>'''
 def make_handler(json_path:Path):
@@ -65,11 +65,13 @@ def make_handler(json_path:Path):
   def log_message(self,fmt,*args):pass
  return Handler
 def main():
- p=argparse.ArgumentParser(description="Pass 2: 中間JSONをブラウザで確認・編集");p.add_argument("json_path",nargs="?",default=str(DEFAULT_JSON_PATH));p.add_argument("--host",default="127.0.0.1");p.add_argument("--port",type=int,default=8080);a=p.parse_args();path=Path(a.json_path).resolve()
+ p=argparse.ArgumentParser(description="Pass 2: 中間JSONをブラウザで確認・編集");p.add_argument("json_path",nargs="?",default=str(DEFAULT_JSON_PATH));p.add_argument("--host",default="127.0.0.1");p.add_argument("--port",type=int,default=8080);p.add_argument("--no-browser",action="store_true",help="確認ページをブラウザで自動的に開かない");a=p.parse_args();path=Path(a.json_path).resolve()
  if not path.is_file():p.error(f"中間JSONが見つかりません: {path}")
  try:
   work=json.loads(path.read_text(encoding="utf-8"))
   if not isinstance(work.get("receipts"),list):raise ValueError("receipts 配列がありません")
  except (OSError,json.JSONDecodeError,ValueError) as e:p.error(f"中間JSONを読み込めません: {e}")
- server=ThreadingHTTPServer((a.host,a.port),make_handler(path));print(f"中間JSON: {path}");print(f"確認画面: http://{a.host}:{a.port}/");print("終了: Ctrl+C");server.serve_forever()
+ server=ThreadingHTTPServer((a.host,a.port),make_handler(path));browser_host="127.0.0.1" if a.host in ("0.0.0.0","::") else a.host;url=f"http://{browser_host}:{a.port}/";print(f"中間JSON: {path}");print(f"確認画面: {url}");print("終了: Ctrl+C")
+ if not a.no_browser:threading.Timer(0.5,lambda:webbrowser.open_new_tab(url)).start()
+ server.serve_forever()
 if __name__=="__main__":main()
