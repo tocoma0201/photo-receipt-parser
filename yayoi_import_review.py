@@ -27,7 +27,8 @@ function render(){let h=document.getElementById('head');h.innerHTML='<th>#</th>'
 async function reloadRows(){if(dirty.size&&!confirm('未保存の変更を破棄して再読込しますか？'))return;let res=await fetch('/api/rows');if(!res.ok){alert(await res.text());return}let x=await res.json();rows=x.rows;dirty.clear();document.getElementById('filename').textContent=x.filename;document.getElementById('status').textContent=`${rows.length} 行`;render()}
 async function save(){let res=await fetch('/api/rows',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rows})});let t=await res.text();if(!res.ok){alert(t);return false}dirty.clear();document.getElementById('status').textContent=t;render();return true}
 async function downloadFile(){if(dirty.size){if(!confirm('未保存の変更があります。保存してからダウンロードしますか？'))return;if(!await save())return}let a=document.createElement('a');a.href='/download?t='+Date.now();a.download=document.getElementById('filename').textContent||'import.txt';document.body.appendChild(a);a.click();a.remove()}
-async function backup(){if(dirty.size){if(!confirm('未保存の変更があります。保存してからバックアップしますか？'))return;if(!await save())return}let btn=document.getElementById('backupButton');btn.disabled=true;document.getElementById('status').textContent='バックアップ中...';try{let res=await fetch('/api/backup',{method:'POST'}),t=await res.text();if(!res.ok){alert(t);document.getElementById('status').textContent='バックアップ失敗';return}document.getElementById('status').textContent=t;alert(t)}finally{btn.disabled=false}}
+async function pollBackup(){let btn=document.getElementById('backupButton'),status=document.getElementById('status');for(;;){await new Promise(r=>setTimeout(r,500));let res=await fetch('/api/backup-status'),x=await res.json();if(x.state==='running'){status.textContent=`バックアップ中... ${x.percent}%`;continue}btn.disabled=false;if(x.state==='done'){status.textContent=`バックアップ完了: ${x.folder}`;alert(status.textContent)}else{status.textContent='バックアップ失敗';alert(x.error||'バックアップに失敗しました')}return}}
+async function backup(){if(dirty.size){if(!confirm('未保存の変更があります。保存してからバックアップしますか？'))return;if(!await save())return}let btn=document.getElementById('backupButton');btn.disabled=true;document.getElementById('status').textContent='バックアップ中... 0%';let res=await fetch('/api/backup',{method:'POST'}),t=await res.text();if(!res.ok){btn.disabled=false;document.getElementById('status').textContent='バックアップ失敗';alert(t);return}pollBackup()}
 async function exitReview(){if(dirty.size&&!confirm('未保存の変更があります。保存せず終了しますか？'))return;let res=await fetch('/api/shutdown',{method:'POST'});if(!res.ok){alert(await res.text());return}window.open('','_self');window.close();setTimeout(()=>document.body.innerHTML='<div style="padding:30px;font-family:sans-serif">確認ツールを終了しました。このタブは閉じてください。</div>',300)}
 const FIELDS='''+json.dumps(FIELD_NAMES,ensure_ascii=False)+r''';reloadRows();</script></body></html>'''
 
@@ -43,12 +44,23 @@ def latest_import_name(folder:Path):
  files=[p for p in folder.glob("import_*.txt") if re.fullmatch(r"import_\d{8}\.txt",p.name)]
  if not files:raise FileNotFoundError(f"インポートファイルが見つかりません: {folder}")
  return max(files,key=lambda p:(p.stat().st_mtime_ns,p.name)).stem
-def backup_folder(path:Path):
- source=path.parent;folder_name=latest_import_name(source);remote=f"mydrive:sync_yayoi/Yayoi/{folder_name}"
- result=subprocess.run(["rclone","copy",str(source),remote,"-P"],capture_output=True,text=True,encoding="utf-8",errors="replace")
- if result.returncode!=0:raise RuntimeError((result.stdout+result.stderr).strip() or f"rclone が終了コード {result.returncode} で失敗しました")
- return folder_name
 def make_handler(path:Path):
+ backup={"state":"idle","percent":0,"folder":"","error":""};backup_lock=threading.Lock()
+ def run_backup():
+  try:
+   source=path.parent;folder_name=latest_import_name(source);remote=f"mydrive:sync_yayoi/Yayoi/{folder_name}"
+   with backup_lock:backup.update(state="running",percent=0,folder=folder_name,error="")
+   process=subprocess.Popen(["rclone","copy",str(source),remote,"-P","--stats","1s","--stats-one-line"],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,encoding="utf-8",errors="replace",bufsize=1)
+   output=[]
+   for line in process.stdout:
+    output.append(line);m=re.search(r"(?:^|\s)(\d{1,3})%",line)
+    if m:
+     with backup_lock:backup["percent"]=min(100,int(m.group(1)))
+   code=process.wait()
+   if code:raise RuntimeError("".join(output[-20:]).strip() or f"rclone が終了コード {code} で失敗しました")
+   with backup_lock:backup.update(state="done",percent=100)
+  except Exception as e:
+   with backup_lock:backup.update(state="error",error=str(e))
  class Handler(BaseHTTPRequestHandler):
   def send_bytes(self,body,ctype="text/plain; charset=utf-8",status=200,headers=None):
    self.send_response(status);self.send_header("Content-Type",ctype);self.send_header("Content-Length",str(len(body)))
@@ -60,6 +72,9 @@ def make_handler(path:Path):
    if u.path=="/api/rows":
     try:return self.send_bytes(json.dumps({"filename":path.name,"rows":read_rows(path)},ensure_ascii=False).encode(),"application/json; charset=utf-8")
     except Exception as e:return self.send_bytes(str(e).encode(),status=500)
+   if u.path=="/api/backup-status":
+    with backup_lock:body=json.dumps(backup,ensure_ascii=False).encode()
+    return self.send_bytes(body,"application/json; charset=utf-8")
    if u.path=="/download":
     try:
      body=path.read_bytes();name=urllib.parse.quote(path.name);return self.send_bytes(body,"text/plain; charset=shift_jis",headers={"Content-Disposition":f"attachment; filename*=UTF-8''{name}","Cache-Control":"no-store"})
@@ -76,7 +91,10 @@ def make_handler(path:Path):
       if len(row)!=len(FIELD_NAMES):raise ValueError(f"{i}行目の列数が {len(row)} です（期待値 {len(FIELD_NAMES)}）")
      write_rows(path,rows);return self.send_bytes(f"保存しました: {len(rows)} 行".encode())
     if u.path=="/api/backup":
-     folder_name=backup_folder(path);return self.send_bytes(f"バックアップ完了: {folder_name}".encode())
+     with backup_lock:
+      if backup["state"]=="running":return self.send_bytes("バックアップは既に実行中です".encode(),status=409)
+      backup.update(state="running",percent=0,folder="",error="")
+     threading.Thread(target=run_backup,daemon=True).start();return self.send_bytes("バックアップを開始しました".encode())
     if u.path=="/api/shutdown":
      self.send_bytes("終了します".encode());threading.Thread(target=self.server.shutdown,daemon=True).start();return
     self.send_error(404)
