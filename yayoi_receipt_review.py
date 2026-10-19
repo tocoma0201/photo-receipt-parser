@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Pass 2: 中間JSONを画像1枚ずつブラウザで確認・編集する。"""
 from __future__ import annotations
-import argparse,json,mimetypes,os,subprocess,sys,threading,urllib.parse
+import argparse,json,mimetypes,os,socket,subprocess,sys,threading,time,urllib.parse
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from pathlib import Path
 DEFAULT_JSON_PATH=Path("data/import_yayoi/receipt_work.json")
@@ -40,6 +40,15 @@ async function generateImport(){let reviewTab=window.open('about:blank','_blank'
 async function exitReview(){await flushSave();await saveState();let res=await fetch('/api/shutdown',{method:'POST'});if(!res.ok){alert(await res.text());return}window.open('','_self');window.close();setTimeout(()=>{document.body.innerHTML='<div style="padding:30px;font-family:sans-serif">レシート確認を終了しました。このタブはブラウザの制限により自動で閉じられませんでした。</div>'},300)}
 fields.concat(['amount']).forEach(id=>document.getElementById(id).addEventListener('input',scheduleSave));['use','confirmed'].forEach(id=>document.getElementById(id).addEventListener('change',scheduleSave));document.getElementById('onlyUnconfirmed').addEventListener('change',async()=>{await flushSave();let list=visibleIndexes();if(list.length&&!list.includes(index))await switchTo(list[0],true);else show()});document.getElementById('searchText').addEventListener('input',()=>renderList());document.getElementById('imageFilter').addEventListener('change',async()=>{await flushSave();let list=visibleIndexes();if(document.getElementById('imageFilter').checked&&list.length&&!list.includes(index))await switchTo(list[0],true);else show()});window.addEventListener('message',e=>{if(e.data&&e.data.type==='receipt-image-filter'&&Array.isArray(e.data.images))applyImageFilter(e.data.images)});document.addEventListener('keydown',e=>{if(e.ctrlKey&&e.key==='Enter'){e.preventDefault();confirmCurrent()}});load();
 </script></body></html>'''
+def wait_for_server(host,port,process,timeout=8.0):
+ deadline=time.monotonic()+timeout
+ while time.monotonic()<deadline:
+  if process.poll() is not None:return False
+  try:
+   with socket.create_connection((host,port),timeout=.25):return True
+  except OSError:time.sleep(.1)
+ return False
+
 def make_handler(json_path:Path):
  def load_work():return json.loads(json_path.read_text(encoding="utf-8"))
  def save_work(work):
@@ -73,7 +82,9 @@ def make_handler(json_path:Path):
      prefix="インポートファイル: ";out_line=next((line for line in result.stdout.splitlines() if line.startswith(prefix)),None)
      if not out_line:return self.send_bytes(json.dumps({"message":text+"\n出力ファイルを特定できませんでした"},ensure_ascii=False).encode(),"application/json; charset=utf-8",500)
      out_path=Path(out_line[len(prefix):].strip()).resolve();review_script=Path(__file__).with_name("yayoi_import_review.py");review_port=8081
-     subprocess.Popen([sys.executable,str(review_script),str(out_path),"--host","0.0.0.0","--port",str(review_port)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+     review_process=subprocess.Popen([sys.executable,str(review_script),str(out_path),"--host","0.0.0.0","--port",str(review_port)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+     if not wait_for_server("127.0.0.1",review_port,review_process):
+      return self.send_bytes(json.dumps({"message":text+"\nWeb確認画面の起動を確認できませんでした。ポート8081が使用中でないか確認してください。"},ensure_ascii=False).encode(),"application/json; charset=utf-8",500)
      web_host=os.environ.get("WEB_HOST");review_url=f"https://{review_port}-{web_host}/" if web_host else f"http://127.0.0.1:{review_port}/"
      return self.send_bytes(json.dumps({"message":text+"\nWeb確認画面を起動しました","review_url":review_url},ensure_ascii=False).encode(),"application/json; charset=utf-8")
     if u.path=="/api/shutdown":
