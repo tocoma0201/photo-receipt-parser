@@ -66,13 +66,12 @@ def make_handler(path:Path):
     m=re.search(r"Checks:\s*(\d+)(?:\s*/\s*(\d+))?",line,re.I)
     if m:
      with backup_lock:backup["checks"]=int(m.group(1))
-    m=re.search(r"Transferred:\s*.*?,\s*(\d{1,3})%",line,re.I)
-    if not m:m=re.search(r"(?:^|\s)(\d{1,3})%",line)
+    m=re.search(r"^Transferred:\s*[^,]+,\s*(\d{1,3})%",line,re.I)
     if m:
      percent=min(100,int(m.group(1)))
      with backup_lock:
-      backup["percent"]=percent
-      if percent>0:backup["phase"]="transferring"
+      backup["percent"]=max(backup["percent"],percent)
+      backup["phase"]="transferring"
    code=process.wait()
    if code:raise RuntimeError("\n".join(output[-20:]).strip() or f"rclone が終了コード {code} で失敗しました")
    with backup_lock:backup.update(state="done",phase="done",percent=100)
