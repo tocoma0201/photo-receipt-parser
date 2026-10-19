@@ -2,13 +2,13 @@
 # -*- coding: utf-8 -*-
 """生成済みの弥生インポートTXTをブラウザで確認・編集する。"""
 from __future__ import annotations
-import argparse,csv,json,os,threading,urllib.parse
+import argparse,csv,json,os,re,subprocess,threading,urllib.parse
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from pathlib import Path
 
 FIELD_NAMES=["識別フラグ","伝票No","決算","取引日付","借方勘定科目","借方補助科目","借方部門","借方税区分","借方金額","借方税金額","貸方勘定科目","貸方補助科目","貸方部門","貸方税区分","貸方金額","貸方税金額","摘要","番号","期日","タイプ","生成元","仕訳メモ","付箋1","付箋2","調整"]
 HTML=r'''<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>弥生インポート確認</title><style>
-body{font-family:sans-serif;margin:0;background:#eee}header{height:44px;box-sizing:border-box;padding:7px 12px;background:#333;color:#fff;display:flex;align-items:center;gap:12px}header button{padding:6px 12px;font-size:14px}.wrap{height:calc(100vh - 44px);overflow:auto;background:#fff}table{border-collapse:collapse;table-layout:fixed;width:max-content;min-width:100%}th,td{border:1px solid #ccc;padding:0;overflow:hidden}th{position:sticky;top:0;background:#eee;z-index:2;padding:6px 8px;white-space:nowrap;font-size:13px;box-sizing:border-box}.thInner{position:relative;width:100%;height:100%}.resizer{position:absolute;right:-8px;top:-6px;width:10px;height:29px;cursor:col-resize;z-index:4}.resizer:hover{background:rgba(0,0,0,.12)}td input{border:0;width:100%;box-sizing:border-box;padding:6px;font-size:14px;background:transparent;text-overflow:clip}td.imageMemo input{cursor:pointer}tr.multiImage{background:#dff0ff}tr.dirty{background:#fff4cc}tr.multiImage.dirty{background:#ffe9a8}.status{margin-left:auto;color:#ddd}.rowno{padding:0 7px;background:#f5f5f5;text-align:right;position:sticky;left:0;z-index:1;width:48px;box-sizing:border-box}</style></head><body><header><strong id="filename"></strong><button onclick="save()">保存</button><button onclick="downloadFile()">ダウンロード</button><button onclick="reloadRows()">再読込</button><button onclick="exitReview()">終了</button><span>列境界をドラッグで幅変更、クリックで内容に合わせます。仕訳メモをダブルクリックするとレシート画面を絞り込みます。</span><span class="status" id="status"></span></header><div class="wrap"><table id="grid"><colgroup id="cols"><col style="width:48px"></colgroup><thead><tr id="head"><th>#</th></tr></thead><tbody id="body"></tbody></table></div><script>
+body{font-family:sans-serif;margin:0;background:#eee}header{height:44px;box-sizing:border-box;padding:7px 12px;background:#333;color:#fff;display:flex;align-items:center;gap:12px}header button{padding:6px 12px;font-size:14px}.wrap{height:calc(100vh - 44px);overflow:auto;background:#fff}table{border-collapse:collapse;table-layout:fixed;width:max-content;min-width:100%}th,td{border:1px solid #ccc;padding:0;overflow:hidden}th{position:sticky;top:0;background:#eee;z-index:2;padding:6px 8px;white-space:nowrap;font-size:13px;box-sizing:border-box}.thInner{position:relative;width:100%;height:100%}.resizer{position:absolute;right:-8px;top:-6px;width:10px;height:29px;cursor:col-resize;z-index:4}.resizer:hover{background:rgba(0,0,0,.12)}td input{border:0;width:100%;box-sizing:border-box;padding:6px;font-size:14px;background:transparent;text-overflow:clip}td.imageMemo input{cursor:pointer}tr.multiImage{background:#dff0ff}tr.dirty{background:#fff4cc}tr.multiImage.dirty{background:#ffe9a8}.status{margin-left:auto;color:#ddd}.rowno{padding:0 7px;background:#f5f5f5;text-align:right;position:sticky;left:0;z-index:1;width:48px;box-sizing:border-box}</style></head><body><header><strong id="filename"></strong><button onclick="save()">保存</button><button onclick="downloadFile()">ダウンロード</button><button onclick="reloadRows()">再読込</button><button id="backupButton" onclick="backup()">バックアップ</button><button onclick="exitReview()">終了</button><span>列境界をドラッグで幅変更、クリックで内容に合わせます。仕訳メモをダブルクリックするとレシート画面を絞り込みます。</span><span class="status" id="status"></span></header><div class="wrap"><table id="grid"><colgroup id="cols"><col style="width:48px"></colgroup><thead><tr id="head"><th>#</th></tr></thead><tbody id="body"></tbody></table></div><script>
 let rows=[],dirty=new Set(),colWidths=[];const MIN_WIDTH=48,MAX_AUTO_WIDTH=800,MEMO_COL=21;
 function yayoiToIso(v){let m=(v||'').match(/^R\.(\d{1,2})\/(\d{1,2})\/(\d{1,2})$/i);if(m)return `${2018+Number(m[1])}-${String(m[2]).padStart(2,'0')}-${String(m[3]).padStart(2,'0')}`;m=(v||'').match(/^(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})$/);return m?`${m[1]}-${String(m[2]).padStart(2,'0')}-${String(m[3]).padStart(2,'0')}`:''}
 function isoToYayoi(v){let m=(v||'').match(/^(\d{4})-(\d{2})-(\d{2})$/);if(!m)return v;let y=Number(m[1]);return y>=2019?`R.${String(y-2018).padStart(2,'0')}/${m[2]}/${m[3]}`:`${m[1]}/${m[2]}/${m[3]}`}
@@ -27,6 +27,7 @@ function render(){let h=document.getElementById('head');h.innerHTML='<th>#</th>'
 async function reloadRows(){if(dirty.size&&!confirm('未保存の変更を破棄して再読込しますか？'))return;let res=await fetch('/api/rows');if(!res.ok){alert(await res.text());return}let x=await res.json();rows=x.rows;dirty.clear();document.getElementById('filename').textContent=x.filename;document.getElementById('status').textContent=`${rows.length} 行`;render()}
 async function save(){let res=await fetch('/api/rows',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rows})});let t=await res.text();if(!res.ok){alert(t);return false}dirty.clear();document.getElementById('status').textContent=t;render();return true}
 async function downloadFile(){if(dirty.size){if(!confirm('未保存の変更があります。保存してからダウンロードしますか？'))return;if(!await save())return}let a=document.createElement('a');a.href='/download?t='+Date.now();a.download=document.getElementById('filename').textContent||'import.txt';document.body.appendChild(a);a.click();a.remove()}
+async function backup(){if(dirty.size){if(!confirm('未保存の変更があります。保存してからバックアップしますか？'))return;if(!await save())return}let btn=document.getElementById('backupButton');btn.disabled=true;document.getElementById('status').textContent='バックアップ中...';try{let res=await fetch('/api/backup',{method:'POST'}),t=await res.text();if(!res.ok){alert(t);document.getElementById('status').textContent='バックアップ失敗';return}document.getElementById('status').textContent=t;alert(t)}finally{btn.disabled=false}}
 async function exitReview(){if(dirty.size&&!confirm('未保存の変更があります。保存せず終了しますか？'))return;let res=await fetch('/api/shutdown',{method:'POST'});if(!res.ok){alert(await res.text());return}window.open('','_self');window.close();setTimeout(()=>document.body.innerHTML='<div style="padding:30px;font-family:sans-serif">確認ツールを終了しました。このタブは閉じてください。</div>',300)}
 const FIELDS='''+json.dumps(FIELD_NAMES,ensure_ascii=False)+r''';reloadRows();</script></body></html>'''
 
@@ -38,6 +39,15 @@ def write_rows(path:Path,rows):
   w=csv.writer(f,lineterminator="\r\n",quoting=csv.QUOTE_ALL)
   for row in rows:w.writerow(row)
  tmp.replace(path)
+def latest_import_name(folder:Path):
+ files=[p for p in folder.glob("import_*.txt") if re.fullmatch(r"import_\d{8}\.txt",p.name)]
+ if not files:raise FileNotFoundError(f"インポートファイルが見つかりません: {folder}")
+ return max(files,key=lambda p:(p.stat().st_mtime_ns,p.name)).stem
+def backup_folder(path:Path):
+ source=path.parent;folder_name=latest_import_name(source);remote=f"mydrive:sync_yayoi/Yayoi/{folder_name}"
+ result=subprocess.run(["rclone","copy",str(source),remote,"-P"],capture_output=True,text=True,encoding="utf-8",errors="replace")
+ if result.returncode!=0:raise RuntimeError((result.stdout+result.stderr).strip() or f"rclone が終了コード {result.returncode} で失敗しました")
+ return folder_name
 def make_handler(path:Path):
  class Handler(BaseHTTPRequestHandler):
   def send_bytes(self,body,ctype="text/plain; charset=utf-8",status=200,headers=None):
@@ -65,6 +75,8 @@ def make_handler(path:Path):
       if not isinstance(row,list):raise ValueError(f"{i}行目が不正です")
       if len(row)!=len(FIELD_NAMES):raise ValueError(f"{i}行目の列数が {len(row)} です（期待値 {len(FIELD_NAMES)}）")
      write_rows(path,rows);return self.send_bytes(f"保存しました: {len(rows)} 行".encode())
+    if u.path=="/api/backup":
+     folder_name=backup_folder(path);return self.send_bytes(f"バックアップ完了: {folder_name}".encode())
     if u.path=="/api/shutdown":
      self.send_bytes("終了します".encode());threading.Thread(target=self.server.shutdown,daemon=True).start();return
     self.send_error(404)
