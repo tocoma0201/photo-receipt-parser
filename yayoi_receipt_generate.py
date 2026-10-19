@@ -24,8 +24,20 @@ def deduplicate(items):
   if x.memo and x.memo not in names:names.append(x.memo)
   base.memo=",".join(names)
  return sorted(merged.values(),key=lambda x:(x.payment_date,x.time_text,x.vendor,x.amount,x.memo))
+def resolve_image(path:Path):
+ if path.exists():return path
+ suffix=path.suffix.lower()
+ if suffix in (".jpg",".jpeg",".webp"):
+  for ext in (".webp",".jpg",".jpeg"):
+   candidate=path.with_suffix(ext)
+   if candidate.exists():return candidate
+ return path
 def sync_filename(item,image_root):
- r=item.record;rel=Path(r["image"]);old=image_root/rel;new_name=core.build_prefixed_name(item.payment_date,old.name);new=old.with_name(new_name)
+ r=item.record;rel=Path(r["image"]);old=resolve_image(image_root/rel)
+ if not old.exists():raise FileNotFoundError(f"画像が見つかりません: {image_root/rel}")
+ if old.name!=rel.name:
+  rel=rel.with_name(old.name);r["image"]=str(rel).replace("\\","/")
+ new_name=core.build_prefixed_name(item.payment_date,old.name);new=old.with_name(new_name)
  if old!=new:
   if old.exists() and not new.exists():old.rename(new)
   elif old.exists() and new.exists():raise FileExistsError(f"リネーム先が既に存在します: {new}")
