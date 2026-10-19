@@ -12,6 +12,35 @@ from pathlib import Path
 
 import yayoi_receipt_import_old as core
 
+WEBP_QUALITY=85
+
+
+def convert_jpeg_to_webp(path:Path)->Path:
+    if path.suffix.lower() not in {".jpg",".jpeg"}:return path
+    try:
+        from PIL import Image,ImageOps
+    except ImportError as exc:
+        raise RuntimeError("WebP変換には Pillow が必要です: pip install Pillow") from exc
+    out=path.with_suffix(".webp");tmp=path.with_name(path.stem+".webp.tmp")
+    try:
+        with Image.open(path) as src:
+            image=ImageOps.exif_transpose(src)
+            if image.mode not in ("RGB","RGBA"):image=image.convert("RGB")
+            image.save(tmp,format="WEBP",quality=WEBP_QUALITY,method=6)
+        with Image.open(tmp) as check:check.verify()
+        tmp.replace(out);path.unlink();return out
+    except Exception:
+        tmp.unlink(missing_ok=True);raise
+
+
+def convert_extracted_images_to_webp(images:list[Path])->list[Path]:
+    converted=[]
+    for i,path in enumerate(images,1):
+        if path.suffix.lower() in {".jpg",".jpeg"}:
+            print(f"[{i}/{len(images)}] WebP変換中: {path.name}",flush=True);path=convert_jpeg_to_webp(path)
+        converted.append(path)
+    return converted
+
 
 def scan_image(path: Path, image_root: Path) -> dict:
     record = {"id":path.name,"image":str(path.relative_to(image_root)).replace("\\","/"),"original_filename":path.name,"date":"","time":"","amount":None,"vendor":"","debit_account":"雑費","summary":"オファー待ち受け代","confirmed":False,"use":True,"warning":"","ocr_text":"","ocr_date_text":"","ocr_amount_text":"","amount_reason":""}
@@ -38,7 +67,8 @@ def main()->int:
         if not json_path.is_file():p.error(f"入力ファイルが指定されておらず、中間JSONも見つかりません: {json_path}")
         return run_review(json_path)
     input_path=Path(args.input_path);output_dir.mkdir(parents=True,exist_ok=True)
-    if input_path.is_file() and input_path.suffix.lower()==".zip":images_dir=output_dir/"images";images=core.iter_images(input_path,output_dir);image_root=images_dir
+    if input_path.is_file() and input_path.suffix.lower()==".zip":
+        images_dir=output_dir/"images";images=core.iter_images(input_path,output_dir);image_root=images_dir;images=convert_extracted_images_to_webp(images)
     elif input_path.is_dir():images=core.iter_images(input_path,output_dir);image_root=input_path
     else:raise ValueError(f"入力が画像フォルダまたはZIPではありません: {input_path}")
     records=[]
