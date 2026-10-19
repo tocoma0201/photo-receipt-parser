@@ -31,7 +31,7 @@ async function goBack(){await flushSave();if(history.length){let i=history.pop()
 async function confirmCurrent(){await flushSave();let current=index,r={...data[current],confirmed:true};if(await persist(current,r)){document.getElementById('confirmed').checked=true;let next=sortedIndexes().find(i=>!data[i].confirmed&&data[i].use!==false);if(next!==undefined)await switchTo(next,true);else{show();await saveState()}}}
 async function toggleConfirmed(i){await flushSave();let r={...data[i],confirmed:!data[i].confirmed};if(await persist(i,r)){if(i===index)document.getElementById('confirmed').checked=r.confirmed;show()}}
 async function jump(i){await flushSave();if(i!==index)await switchTo(i,true)}async function move(dir){await flushSave();let order=sortedIndexes(),p=order.indexOf(index),n=p+dir;if(n>=0&&n<order.length)await switchTo(order[n],true)}
-async function generateImport(){await flushSave();let res=await fetch('/api/generate',{method:'POST'}),text=await res.text();alert(text);if(res.ok){let r=await fetch('/api/receipts');if(r.ok){data=await r.json();show();await saveState()}}}
+async function generateImport(){let reviewTab=window.open('about:blank','_blank');await flushSave();let res=await fetch('/api/generate',{method:'POST'}),x;try{x=await res.json()}catch(e){x={message:'応答の解析に失敗しました'}}if(!res.ok){if(reviewTab)reviewTab.close();alert(x.message||'importファイル出力に失敗しました');return}if(reviewTab&&x.review_url)reviewTab.location=x.review_url;else if(reviewTab)reviewTab.close();alert(x.message);let r=await fetch('/api/receipts');if(r.ok){data=await r.json();show();await saveState()}}
 async function exitReview(){await flushSave();await saveState();let res=await fetch('/api/shutdown',{method:'POST'});if(!res.ok){alert(await res.text());return}window.open('','_self');window.close();setTimeout(()=>{document.body.innerHTML='<div style="padding:30px;font-family:sans-serif">レシート確認を終了しました。このタブはブラウザの制限により自動で閉じられませんでした。</div>'},300)}
 fields.concat(['amount']).forEach(id=>document.getElementById(id).addEventListener('input',scheduleSave));['use','confirmed'].forEach(id=>document.getElementById(id).addEventListener('change',scheduleSave));document.getElementById('onlyUnconfirmed').addEventListener('change',async()=>{await flushSave();let list=visibleIndexes();if(list.length&&!list.includes(index))await switchTo(list[0],true);else show()});document.getElementById('searchText').addEventListener('input',()=>renderList());document.addEventListener('keydown',e=>{if(e.ctrlKey&&e.key==='Enter'){e.preventDefault();confirmCurrent()}});load();
 </script></body></html>'''
@@ -63,7 +63,14 @@ def make_handler(json_path:Path):
     if u.path=="/api/review-state":
      n=int(self.headers.get("Content-Length","0"));state=json.loads(self.rfile.read(n));work=load_work();work["review_state"]={"index":state.get("index"),"history":state.get("history",[])};save_work(work);return self.send_bytes(b"ok","text/plain")
     if u.path=="/api/generate":
-     script=Path(__file__).with_name("yayoi_receipt_generate.py");result=subprocess.run([sys.executable,str(script),str(json_path)],capture_output=True,text=True,encoding="utf-8");text=(result.stdout+result.stderr).strip() or ("完了" if result.returncode==0 else "失敗");return self.send_bytes(text.encode(),"text/plain; charset=utf-8",200 if result.returncode==0 else 500)
+     script=Path(__file__).with_name("yayoi_receipt_generate.py");result=subprocess.run([sys.executable,str(script),str(json_path)],capture_output=True,text=True,encoding="utf-8");text=(result.stdout+result.stderr).strip() or ("完了" if result.returncode==0 else "失敗")
+     if result.returncode!=0:return self.send_bytes(json.dumps({"message":text},ensure_ascii=False).encode(),"application/json; charset=utf-8",500)
+     prefix="インポートファイル: ";out_line=next((line for line in result.stdout.splitlines() if line.startswith(prefix)),None)
+     if not out_line:return self.send_bytes(json.dumps({"message":text+"\n出力ファイルを特定できませんでした"},ensure_ascii=False).encode(),"application/json; charset=utf-8",500)
+     out_path=Path(out_line[len(prefix):].strip()).resolve();review_script=Path(__file__).with_name("yayoi_import_review.py");review_port=8081
+     subprocess.Popen([sys.executable,str(review_script),str(out_path),"--host","0.0.0.0","--port",str(review_port)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+     web_host=os.environ.get("WEB_HOST");review_url=f"https://{review_port}-{web_host}/" if web_host else f"http://127.0.0.1:{review_port}/"
+     return self.send_bytes(json.dumps({"message":text+"\nWeb確認画面を起動しました","review_url":review_url},ensure_ascii=False).encode(),"application/json; charset=utf-8")
     if u.path=="/api/shutdown":
      self.send_bytes("終了します".encode(),"text/plain; charset=utf-8");threading.Thread(target=self.server.shutdown,daemon=True).start();return
     self.send_error(404)
