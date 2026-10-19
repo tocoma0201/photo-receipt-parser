@@ -20,9 +20,9 @@ def deduplicate(items):
  for x in items:
   key=(core.vendor_key(x.vendor),x.payment_date.isoformat(),x.time_text,x.amount)
   if key not in merged:merged[key]=x;continue
-  base=merged[key];names=[n for n in base.memo.split("\n") if n]
+  base=merged[key];names=[n for n in base.memo.split(",") if n]
   if x.memo and x.memo not in names:names.append(x.memo)
-  base.memo="\n".join(names)
+  base.memo=",".join(names)
  return sorted(merged.values(),key=lambda x:(x.payment_date,x.time_text,x.vendor,x.amount,x.memo))
 def sync_filename(item,image_root):
  r=item.record;rel=Path(r["image"]);old=image_root/rel;new_name=core.build_prefixed_name(item.payment_date,old.name);new=old.with_name(new_name)
