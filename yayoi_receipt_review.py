@@ -27,7 +27,7 @@ async function flushSave(){if(saveTimer){clearTimeout(saveTimer);saveTimer=null;
 async function resetCurrent(){clearTimeout(saveTimer);saveTimer=null;if(pendingSave)await pendingSave;let i=index,r=structuredClone(initialData[i]);if(await persist(i,r))show()}
 function switchTo(i,remember=true){if(i===index)return;if(remember)history.push(index);index=i;show()}
 async function goBack(){await flushSave();if(history.length)switchTo(history.pop(),false)}
-async function confirmCurrent(){await flushSave();let current=index,r={...data[current],confirmed:true};if(await persist(current,r)){document.getElementById('confirmed').checked=true;let next=sortedIndexes().find(i=>!data[i].confirmed);if(next!==undefined)switchTo(next,true);else show()}}
+async function confirmCurrent(){await flushSave();let current=index,r={...data[current],confirmed:true};if(await persist(current,r)){document.getElementById('confirmed').checked=true;let next=sortedIndexes().find(i=>!data[i].confirmed&&data[i].use!==false);if(next!==undefined)switchTo(next,true);else show()}}
 async function toggleConfirmed(i){await flushSave();let r={...data[i],confirmed:!data[i].confirmed};if(await persist(i,r)){if(i===index)document.getElementById('confirmed').checked=r.confirmed;show()}}
 async function jump(i){await flushSave();if(i!==index)switchTo(i,true)}async function move(dir){await flushSave();let order=sortedIndexes(),p=order.indexOf(index),n=p+dir;if(n>=0&&n<order.length)switchTo(order[n],true)}
 async function generateImport(){await flushSave();let res=await fetch('/api/generate',{method:'POST'}),text=await res.text();alert(text);if(res.ok){let r=await fetch('/api/receipts');if(r.ok){data=await r.json();show()}}}
